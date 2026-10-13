@@ -9,10 +9,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -108,6 +110,7 @@ func (f HandlerFunc) HandleMessage(msg *Message) {
 // StandardDispatcher is a dispatcher for OSC packets. It handles the dispatching of
 // received OSC packets to Handlers for their given address.
 type StandardDispatcher struct {
+	mu             sync.RWMutex
 	handlers       map[string]Handler
 	defaultHandler Handler
 }
@@ -117,9 +120,13 @@ func NewStandardDispatcher() *StandardDispatcher {
 	return &StandardDispatcher{handlers: make(map[string]Handler)}
 }
 
-// AddMsgHandler adds a new message handler for the given OSC address.
+// AddMsgHandler adds a new message handler for the given OSC address. It may
+// be called while the server is running; the dispatcher is safe for
+// concurrent use.
 func (s *StandardDispatcher) AddMsgHandler(addr string, handler HandlerFunc) error {
 	if addr == "*" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		s.defaultHandler = handler
 		return nil
 	}
@@ -129,6 +136,8 @@ func (s *StandardDispatcher) AddMsgHandler(addr string, handler HandlerFunc) err
 		}
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if addressExists(addr, s.handlers) {
 		return errors.New("OSC address exists already")
 	}
@@ -144,14 +153,7 @@ func (s *StandardDispatcher) Dispatch(packet Packet) {
 		return
 
 	case *Message:
-		for addr, handler := range s.handlers {
-			if p.Match(addr) {
-				handler.HandleMessage(p)
-			}
-		}
-		if s.defaultHandler != nil {
-			s.defaultHandler.HandleMessage(p)
-		}
+		s.dispatchMessage(p)
 
 	case *Bundle:
 		timer := time.NewTimer(p.Timetag.ExpiresIn())
@@ -159,14 +161,7 @@ func (s *StandardDispatcher) Dispatch(packet Packet) {
 		go func() {
 			<-timer.C
 			for _, message := range p.Messages {
-				for address, handler := range s.handlers {
-					if message.Match(address) {
-						handler.HandleMessage(message)
-					}
-				}
-				if s.defaultHandler != nil {
-					s.defaultHandler.HandleMessage(message)
-				}
+				s.dispatchMessage(message)
 			}
 
 			// Process all bundles
@@ -174,6 +169,22 @@ func (s *StandardDispatcher) Dispatch(packet Packet) {
 				s.Dispatch(b)
 			}
 		}()
+	}
+}
+
+// dispatchMessage delivers a message to all matching handlers and the default
+// handler. Handler callbacks run with the dispatcher lock held, so a handler
+// must not call AddMsgHandler from the same goroutine or it will deadlock.
+func (s *StandardDispatcher) dispatchMessage(msg *Message) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for addr, handler := range s.handlers {
+		if msg.Match(addr) {
+			handler.HandleMessage(msg)
+		}
+	}
+	if s.defaultHandler != nil {
+		s.defaultHandler.HandleMessage(msg)
 	}
 }
 
@@ -210,9 +221,16 @@ func (msg *Message) ClearData() {
 }
 
 // Match returns true, if the OSC address pattern of the OSC Message matches the given
-// address. The match is case sensitive!
+// address. The match is case sensitive! The pattern must match the whole
+// address: a message to /time matches neither a handler for /time/str nor one
+// for /foo/time. An address pattern that is not a valid pattern expression
+// (e.g. it contains a stray '\' or an unbalanced '[') never matches rather
+// than panicking, since message addresses come from the network.
 func (msg *Message) Match(addr string) bool {
-	exp := getRegEx(msg.Address)
+	exp, err := getRegEx("^" + msg.Address + "$")
+	if err != nil {
+		return false
+	}
 	return exp.MatchString(addr)
 }
 
@@ -545,12 +563,21 @@ func (s *Server) ListenAndServe() error {
 }
 
 // Serve retrieves incoming OSC packets from the given connection and dispatches
-// retrieved OSC packets. If something goes wrong an error is returned.
+// retrieved OSC packets. Malformed datagrams are dropped so a single bad
+// packet cannot bring down the server; the loop only returns on connection
+// errors. If something goes wrong an error is returned.
 func (s *Server) Serve(c net.PacketConn) error {
 	var tempDelay time.Duration
 	for {
-		msg, err := s.readFromConnection(c)
+		msg, err := s.readPacketFrom(c)
 		if err != nil {
+			// A parse error means one malformed datagram: drop it and keep
+			// serving. Connection errors (from ReadFrom or the deadline)
+			// are the ones that end the loop. (Issue #29.)
+			if _, ok := err.(net.Error); !ok {
+				tempDelay = 0
+				continue
+			}
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				if tempDelay == 0 {
 					tempDelay = 5 * time.Millisecond
@@ -568,6 +595,29 @@ func (s *Server) Serve(c net.PacketConn) error {
 		tempDelay = 0
 		go s.Dispatcher.Dispatch(msg)
 	}
+}
+
+// readPacketFrom reads one datagram from the connection and parses it.
+// Parse errors of the datagram are returned to the caller; Serve decides to
+// drop them, ReceivePacket reports them.
+func (s *Server) readPacketFrom(c net.PacketConn) (Packet, error) {
+	if s.ReadTimeout != 0 {
+		if err := c.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
+			return nil, err
+		}
+	}
+
+	data := make([]byte, 65535)
+	n, _, err := c.ReadFrom(data)
+	if err != nil {
+		return nil, err
+	}
+
+	p, err := readPacket(bufio.NewReader(bytes.NewBuffer(data[0:n])))
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // CloseConnection forcibly closes a server's connection.
@@ -593,28 +643,7 @@ func (s *Server) CloseConnection() error {
 
 // ReceivePacket listens for incoming OSC packets and returns the packet if one is received.
 func (s *Server) ReceivePacket(c net.PacketConn) (Packet, error) {
-	return s.readFromConnection(c)
-}
-
-// readFromConnection retrieves OSC packets.
-func (s *Server) readFromConnection(c net.PacketConn) (Packet, error) {
-	if s.ReadTimeout != 0 {
-		if err := c.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
-			return nil, err
-		}
-	}
-
-	data := make([]byte, 65535)
-	n, _, err := c.ReadFrom(data)
-	if err != nil {
-		return nil, err
-	}
-
-	p, err := readPacket(bufio.NewReader(bytes.NewBuffer(data[0:n])))
-	if err != nil {
-		return nil, err
-	}
-	return p, nil
+	return s.readPacketFrom(c)
 }
 
 // ParsePacket parses the given msg string and returns a Packet
@@ -649,9 +678,10 @@ func readPacket(reader *bufio.Reader) (Packet, error) {
 		}
 		return packet, nil
 	}
-
-	var p Packet
-	return p, nil
+	// Not a message or bundle: an unknown or corrupted packet. Return an
+	// untyped nil Packet so callers can distinguish (msg == nil) without a
+	// typed-nil-interface gotcha.
+	return nil, nil
 }
 
 // readBundle reads an Bundle from reader.
@@ -682,8 +712,13 @@ func readBundle(reader *bufio.Reader) (*Bundle, error) {
 		if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
 			return nil, err
 		}
+		if length < 1 {
+			// A non-positive element length is trailing garbage after the
+			// last valid element; stop and keep what we have. (Issue #53.)
+			break
+		}
 
-		p, err := readPacket(reader)
+		p, err := readPacket(bufio.NewReader(io.LimitReader(reader, int64(length))))
 		if err != nil {
 			return nil, err
 		}
@@ -783,7 +818,7 @@ func readArguments(msg *Message, reader *bufio.Reader) error {
 		case 't': // OSC time tag
 			var tt uint64
 			if err = binary.Read(reader, binary.BigEndian, &tt); err != nil {
-				return nil
+			return err
 			}
 			msg.Append(*NewTimetagFromTimetag(tt))
 
@@ -934,13 +969,15 @@ func readBlob(reader *bufio.Reader) ([]byte, int, error) {
 	}
 	n := 4 + int(blobLen)
 
-	if blobLen < 1 || blobLen > int32(reader.Buffered()) {
+	if blobLen < 1 {
 		return nil, 0, fmt.Errorf("readBlob: invalid blob length %d", blobLen)
 	}
 
-	// Read the data
+	// Read the data. io.ReadFull reads through the bufio.Reader's buffer
+	// window, so blobs larger than the bufio buffer size (4096 bytes) are
+	// read correctly as well. A truncated datagram yields io.ErrUnexpectedEOF.
 	blob := make([]byte, blobLen)
-	if _, err := reader.Read(blob); err != nil {
+	if _, err := io.ReadFull(reader, blob); err != nil {
 		return nil, 0, err
 	}
 
@@ -949,7 +986,7 @@ func readBlob(reader *bufio.Reader) ([]byte, int, error) {
 	if numPadBytes > 0 {
 		n += numPadBytes
 		dummy := make([]byte, numPadBytes)
-		if _, err := reader.Read(dummy); err != nil {
+		if _, err := io.ReadFull(reader, dummy); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -1068,8 +1105,9 @@ func addressExists(addr string, handlers map[string]Handler) bool {
 }
 
 // getRegEx compiles and returns a regular expression object for the given
-// address `pattern`.
-func getRegEx(pattern string) *regexp.Regexp {
+// address `pattern`. An invalid pattern yields an error instead of a panic,
+// since message addresses can come from the network.
+func getRegEx(pattern string) (*regexp.Regexp, error) {
 	for _, trs := range []struct {
 		old, new string
 	}{
@@ -1085,7 +1123,7 @@ func getRegEx(pattern string) *regexp.Regexp {
 		pattern = strings.Replace(pattern, trs.old, trs.new, -1)
 	}
 
-	return regexp.MustCompile(pattern)
+	return regexp.Compile(pattern)
 }
 
 // getTypeTag returns the OSC type tag for the given argument.

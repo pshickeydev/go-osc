@@ -22,7 +22,7 @@
     -   'T' (True)
     -   'F' (False)
     -   'N' (Nil)
--   Support for OSC address pattern including '\*', '?', '{,}' and '[]' wildcards
+-   Support for OSC address pattern matching in received messages, including '\*' and '?' wildcards (handler addresses must be plain paths)
 
 ## Install
 
