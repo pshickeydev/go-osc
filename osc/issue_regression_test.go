@@ -116,6 +116,7 @@ func TestMessageMatchInvalidPattern(t *testing.T) {
 		}
 	}
 }
+
 // TestServeSurvivesMalformedDatagram checks that a server dispatches messages
 // received after a malformed datagram, instead of terminating Serve.
 // (Issue #29.)

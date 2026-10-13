@@ -818,7 +818,7 @@ func readArguments(msg *Message, reader *bufio.Reader) error {
 		case 't': // OSC time tag
 			var tt uint64
 			if err = binary.Read(reader, binary.BigEndian, &tt); err != nil {
-			return err
+				return err
 			}
 			msg.Append(*NewTimetagFromTimetag(tt))
 

@@ -1,7 +1,7 @@
 # GoOSC
 
-![Build](https://github.com/hypebeast/go-osc/actions/workflows/test.yml/badge.svg) [![GoDoc](https://godoc.org/github.com/hypebeast/go-osc/osc?status.svg)](https://godoc.org/github.com/hypebeast/go-osc/osc) [![Coverage Status](https://coveralls.io/repos/github/hypebeast/go-osc/badge.svg?branch=master)](https://coveralls.io/github/hypebeast/go-osc?branch=master)
-[![Go Report Card](https://goreportcard.com/badge/github.com/hypebeast/go-osc)](https://goreportcard.com/report/github.com/hypebeast/go-osc)
+![Build](https://github.com/pshickeydev/go-osc/actions/workflows/test.yml/badge.svg) [![GoDoc](https://godoc.org/github.com/pshickeydev/go-osc/osc?status.svg)](https://godoc.org/github.com/pshickeydev/go-osc/osc) [![Coverage Status](https://coveralls.io/repos/github/pshickeydev/go-osc/badge.svg?branch=master)](https://coveralls.io/github/pshickeydev/go-osc?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/pshickeydev/go-osc)](https://goreportcard.com/report/github.com/pshickeydev/go-osc)
 
 [Open Sound Control (OSC)](http://opensoundcontrol.org) library for Golang. Implemented in pure Go.
 
@@ -27,7 +27,7 @@
 ## Install
 
 ```shell
-go get github.com/hypebeast/go-osc
+go get github.com/pshickeydev/go-osc
 ```
 
 ## Usage
@@ -35,7 +35,7 @@ go get github.com/hypebeast/go-osc
 ### Client
 
 ```go
-import "github.com/hypebeast/go-osc/osc"
+import "github.com/pshickeydev/go-osc/osc"
 
 func main() {
     client := osc.NewClient("localhost", 8765)
@@ -52,7 +52,7 @@ func main() {
 ```go
 package main
 
-import "github.com/hypebeast/go-osc/osc"
+import "github.com/pshickeydev/go-osc/osc"
 
 func main() {
     addr := "127.0.0.1:8765"

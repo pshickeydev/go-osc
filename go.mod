@@ -1,3 +1,3 @@
-module github.com/hypebeast/go-osc
+module github.com/pshickeydev/go-osc
 
 go 1.16
